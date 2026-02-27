@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Eurobroker Research</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#F3F4F6;font-family:'Inter','Segoe UI',system-ui,sans-serif}
+input:focus{outline:2px solid #1D4ED8;outline-offset:1px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+@media print{
+  body>*:not(#eb-print-root){display:none!important}
+  #eb-print-root{display:block!important;position:static!important}
+  @page{margin:10mm 12mm;size:A4}
+  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef}=React;
+
+const P={navy:"#0F2044",blue:"#1D4ED8",lightBlue:"#EFF6FF",accent:"#3B82F6",gold:"#B45309",green:"#16A34A",red:"#DC2626",gray50:"#F9FAFB",gray100:"#F3F4F6",gray300:"#D1D5DB",gray500:"#6B7280",gray700:"#374151",text:"#111827",white:"#FFFFFF"};
+const RC={BUY:P.green,SELL:P.red,HOLD:P.gold};
+const yoyC=v=>v&&String(v).startsWith("-")?P.red:P.green;
+const ff=s=>({fontFamily:"'Inter','Segoe UI',system-ui,sans-serif",...s});
+
+// Parse ESG score robustly — handle "7,8" "78" "7.8" etc.
+const parseESG=v=>{
+  if(v==null) return 50;
+  const s=String(v).replace(",",".");
+  const n=parseFloat(s);
+  if(isNaN(n)) return 50;
+  // if looks like it's out of 10 (e.g. 7.8), scale to 100
+  return n<=10 ? Math.round(n*10) : Math.round(n);
+};
+
+// ── SVG Charts ───────────────────────────────────────────────────────────────
+function LineChartSVG({data,width=860,height=200,color="#0F2044",events=[]}) {
+  if(!data||data.length<2) return null;
+  const pad={top:24,right:16,bottom:32,left:60};
+  const W=width-pad.left-pad.right,H=height-pad.top-pad.bottom;
+  const prices=data.map(d=>d.price).filter(Boolean);
+  if(!prices.length) return null;
+  const mn=Math.min(...prices),mx=Math.max(...prices);
+  const range=mx-mn||1;
+  const px=i=>pad.left+(i/(data.length-1))*W;
+  const py=v=>pad.top+H-((v-mn)/range)*H;
+  const points=data.map((d,i)=>`${px(i)},${py(d.price)}`).join(" ");
+  const area=`${px(0)},${pad.top+H} `+data.map((d,i)=>`${px(i)},${py(d.price)}`).join(" ")+` ${px(data.length-1)},${pad.top+H}`;
+  const yTicks=5;
+  const fmt=v=>v>=1000?`${(v/1000).toFixed(1)}k`:v.toFixed(1);
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{display:"block"}}>
+      <defs>
+        <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.18"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      {Array.from({length:yTicks}).map((_,i)=>{
+        const v=mn+(i/(yTicks-1))*range;
+        const y=py(v);
+        return <g key={i}>
+          <line x1={pad.left} y1={y} x2={pad.left+W} y2={y} stroke="#F3F4F6" strokeWidth="1"/>
+          <text x={pad.left-8} y={y+4} textAnchor="end" fontSize="10" fill={P.gray500}>{fmt(v)}</text>
+        </g>;
+      })}
+      <polygon points={area} fill="url(#lg)"/>
+      <polyline points={points} fill="none" stroke={color} strokeWidth="2.5"/>
+      {events.map((ev,i)=>{
+        const idx=data.findIndex(d=>d.date===ev.date);
+        if(idx<0) return null;
+        const x=px(idx),y=py(data[idx].price);
+        return <g key={i}>
+          <line x1={x} y1={pad.top} x2={x} y2={pad.top+H} stroke={P.blue} strokeWidth="1" strokeDasharray="3,2"/>
+          <circle cx={x} cy={y} r="4" fill={P.blue} stroke={P.white} strokeWidth="1.5"/>
+          <text x={x} y={pad.top-6} textAnchor="middle" fontSize="8" fill={P.blue}>{ev.event}</text>
+        </g>;
+      })}
+      {data.filter((_,i)=>i%(Math.ceil(data.length/8))===0||i===data.length-1).map((d,i)=>{
+        const idx=data.indexOf(d);
+        return <text key={i} x={px(idx)} y={pad.top+H+18} textAnchor="middle" fontSize="10" fill={P.gray500}>{d.date}</text>;
+      })}
+      <line x1={pad.left} y1={pad.top} x2={pad.left} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+      <line x1={pad.left} y1={pad.top+H} x2={pad.left+W} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+    </svg>
+  );
+}
+
+function BarChartSVG({data,keys,colors,width=400,height=170}){
+  if(!data||!data.length) return null;
+  const pad={top:16,right:8,bottom:32,left:56};
+  const W=width-pad.left-pad.right,H=height-pad.top-pad.bottom;
+  const allVals=data.flatMap(d=>keys.map(k=>parseFloat(d[k])||0)).filter(v=>!isNaN(v)&&v>0);
+  if(!allVals.length) return null;
+  const mx=Math.max(...allVals)||1;
+  const barW=Math.max(8,Math.floor((W/data.length)*0.3));
+  const gap=3;
+  const groupW=W/data.length;
+  const fmt=v=>v>=1000?`${(v/1000).toFixed(0)}k`:Math.round(v);
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{display:"block"}}>
+      {[0,0.25,0.5,0.75,1].map((t,i)=>{
+        const v=mx*t,y=pad.top+H-(t*H);
+        return <g key={i}>
+          <line x1={pad.left} y1={y} x2={pad.left+W} y2={y} stroke="#F3F4F6" strokeWidth="1"/>
+          <text x={pad.left-6} y={y+3} textAnchor="end" fontSize="10" fill={P.gray500}>{fmt(v)}</text>
+        </g>;
+      })}
+      {data.map((d,i)=>{
+        const cx=pad.left+i*groupW+groupW/2;
+        const totalW=keys.length*(barW+gap)-gap;
+        const startX=cx-totalW/2;
+        return <g key={i}>
+          {keys.map((k,j)=>{
+            const v=parseFloat(d[k])||0;
+            const bh=Math.max(0,(v/mx)*H);
+            return <rect key={k} x={startX+j*(barW+gap)} y={pad.top+H-bh} width={barW} height={bh} fill={colors[j]} rx="1"/>;
+          })}
+          <text x={cx} y={pad.top+H+16} textAnchor="middle" fontSize="9" fill={P.gray500}>{d.year}</text>
+        </g>;
+      })}
+      <line x1={pad.left} y1={pad.top} x2={pad.left} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+      <line x1={pad.left} y1={pad.top+H} x2={pad.left+W} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+      {keys.map((k,i)=>(
+        <g key={k} transform={`translate(${pad.left+i*100},${height-4})`}>
+          <rect x="0" y="-8" width="8" height="8" fill={colors[i]} rx="1"/>
+          <text x="12" y="0" fontSize="9" fill={P.gray500}>{k}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function MultiLineSVG({data,keys,colors,width=400,height=170}){
+  if(!data||data.length<2) return null;
+  const pad={top:16,right:8,bottom:32,left:40};
+  const W=width-pad.left-pad.right,H=height-pad.top-pad.bottom;
+  const allVals=data.flatMap(d=>keys.map(k=>parseFloat(d[k])||0)).filter(v=>v>0&&isFinite(v));
+  if(!allVals.length) return null;
+  const mx=Math.max(...allVals)||1;
+  const px=i=>pad.left+(i/(data.length-1))*W;
+  const py=v=>pad.top+H-((v/mx)*H);
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{display:"block"}}>
+      {[0,0.25,0.5,0.75,1].map((t,i)=>{
+        const v=mx*t,y=py(v);
+        return <g key={i}>
+          <line x1={pad.left} y1={y} x2={pad.left+W} y2={y} stroke="#F3F4F6" strokeWidth="1"/>
+          <text x={pad.left-4} y={y+3} textAnchor="end" fontSize="10" fill={P.gray500}>{v.toFixed(1)}</text>
+        </g>;
+      })}
+      {keys.map((k,ki)=>{
+        const validData=data.filter(d=>parseFloat(d[k])>0&&isFinite(parseFloat(d[k])));
+        if(validData.length<2) return null;
+        const pts=data.map((d,i)=>`${px(i)},${py(Math.max(0,parseFloat(d[k])||0))}`).join(" ");
+        return <g key={k}>
+          <polyline points={pts} fill="none" stroke={colors[ki]} strokeWidth="2"/>
+          {data.map((d,i)=>{
+            const v=parseFloat(d[k]);
+            if(!v||!isFinite(v)) return null;
+            return <circle key={i} cx={px(i)} cy={py(v)} r="3.5" fill={colors[ki]} stroke={P.white} strokeWidth="1"/>;
+          })}
+        </g>;
+      })}
+      {data.map((d,i)=>(
+        <text key={i} x={px(i)} y={pad.top+H+16} textAnchor="middle" fontSize="9" fill={P.gray500}>{d.year}</text>
+      ))}
+      <line x1={pad.left} y1={pad.top} x2={pad.left} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+      <line x1={pad.left} y1={pad.top+H} x2={pad.left+W} y2={pad.top+H} stroke={P.gray300} strokeWidth="1"/>
+      {keys.map((k,i)=>(
+        <g key={k} transform={`translate(${pad.left+i*100},${pad.top-4})`}>
+          <line x1="0" y1="0" x2="12" y2="0" stroke={colors[i]} strokeWidth="2"/>
+          <circle cx="6" cy="0" r="3" fill={colors[i]}/>
+          <text x="16" y="3" fontSize="9" fill={P.gray500}>{k}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+// ── UI Components ────────────────────────────────────────────────────────────
+function HR(){return <hr style={{border:"none",borderTop:`1px solid ${P.gray300}`,margin:"20px 0"}}/>;}
+function SecTitle({children,source}){
+  return <div style={{marginBottom:10}}>
+    <div style={ff({fontSize:10,fontWeight:800,letterSpacing:"0.12em",textTransform:"uppercase",color:P.navy,borderLeft:`3px solid ${P.blue}`,paddingLeft:8,marginTop:22})}>{children}</div>
+    {source&&<div style={ff({fontSize:9,color:P.gray500,marginTop:2,paddingLeft:11})}>¹ {source}</div>}
+  </div>;
+}
+
+function Header({data}){
+  const today=new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"});
+  return <div style={{background:P.navy,padding:"18px 28px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+    <div>
+      <div style={ff({fontSize:17,fontWeight:800,letterSpacing:"0.06em",color:P.white})}>EUROBROKER RESEARCH</div>
+      <div style={ff({fontSize:10,color:"#93C5FD",letterSpacing:"0.1em",textTransform:"uppercase",marginTop:2})}>Equity Research · {data.sector}</div>
+    </div>
+    <div style={{textAlign:"right"}}>
+      <div style={ff({fontSize:12,fontWeight:700,color:P.white})}>Armand de Valroger</div>
+      <div style={ff({fontSize:10,color:"#93C5FD"})}>Equity Analyst</div>
+      <div style={ff({fontSize:10,color:"#93C5FD"})}>armand.devalroger@gmail.com</div>
+      <div style={ff({fontSize:10,color:"#93C5FD",marginTop:2})}>{today}</div>
+    </div>
+  </div>;
+}
+
+function TitleBlock({data,onRegen}){
+  const col=RC[data.rating]||P.gray500;
+  const upNum=parseFloat(data.upside);
+  return <div style={{background:"#F0F4FF",borderBottom:`3px solid ${P.blue}`,padding:"16px 28px"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+      <div>
+        <div style={ff({fontSize:24,fontWeight:900,color:P.navy})}>{data.company}</div>
+        <div style={ff({fontSize:12,color:P.gray500,marginTop:2})}>
+          {data.ticker} [{data.exchange}] · {data.sector} · {data.country}
+          {" · "}<span onClick={onRegen} style={{color:P.blue,cursor:"pointer",textDecoration:"underline",fontSize:11}}>Regenerate</span>
+        </div>
+        <div style={{marginTop:10,display:"inline-flex",alignItems:"center",gap:6}}>
+          <span style={ff({fontWeight:900,fontSize:18,color:col,borderLeft:`4px solid ${col}`,paddingLeft:8})}>{data.rating}</span>
+          <span style={ff({fontSize:12,color:P.gray500})}>· Target: <strong style={{color:P.navy}}>{data.currency} {data.priceTarget}</strong></span>
+          <span style={ff({fontSize:12,fontWeight:700,color:upNum>=0?P.green:P.red})}>({upNum>=0?"+":""}{upNum}%)</span>
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 32px"}}>
+        {[["Current Price",`${data.currency} ${data.currentPrice}`],["Market Cap",data.marketCap],["52-Week Range",data.weekRange52],["Price Target",`${data.currency} ${data.priceTarget}`]].map(([l,v])=>(
+          <div key={l} style={{borderBottom:`1px solid ${P.gray300}`,padding:"3px 0",display:"flex",justifyContent:"space-between",gap:16}}>
+            <span style={ff({color:P.gray500,fontSize:11})}>{l}</span>
+            <span style={ff({fontWeight:700,color:P.navy,fontSize:11})}>{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>;
+}
+
+function ExecSummary({text}){
+  return <div>
+    <SecTitle source="Company filings, Eurobroker Research estimates">Executive Summary</SecTitle>
+    <div style={ff({background:P.lightBlue,borderLeft:`4px solid ${P.blue}`,padding:"14px 18px",fontSize:12.5,lineHeight:1.9,color:P.text})}>{text}</div>
+  </div>;
+}
+
+function MetricBox({name,value,yoy}){
+  return <div style={{flex:1,padding:"10px 6px",textAlign:"center",borderRight:`1px solid ${P.gray300}`}}>
+    <div style={ff({fontSize:9,fontWeight:800,letterSpacing:"0.08em",color:P.gray500,textTransform:"uppercase",marginBottom:4})}>{name}</div>
+    <div style={ff({fontSize:14,fontWeight:800,color:P.navy})}>{value||"—"}</div>
+    {yoy&&<div style={ff({fontSize:9,color:yoyC(yoy),marginTop:2,fontWeight:600})}>{yoy}</div>}
+  </div>;
+}
+
+function Metrics({m}){
+  const items=[
+    {name:"Revenue",value:m.revenue,yoy:m.revenueYoY},{name:"EBITDA Margin",value:m.ebitdaMargin,yoy:m.ebitdaMarginYoY},
+    {name:"Net Income",value:m.netIncome,yoy:m.netIncomeYoY},{name:"EPS",value:m.eps,yoy:m.epsYoY},
+    {name:"P/E",value:m.pe},{name:"EV/EBITDA",value:m.evEbitda},{name:"Div. Yield",value:m.dividendYield},{name:"Beta",value:m.beta},
+  ];
+  return <div>
+    <SecTitle source="Yahoo Finance, Bloomberg (real-time where available)">Key Financials Snapshot</SecTitle>
+    <div style={{display:"flex",border:`1px solid ${P.gray300}`,overflow:"hidden"}}>{items.map((it,i)=><MetricBox key={i} {...it}/>)}</div>
+  </div>;
+}
+
+function Charts({priceHistory,priceEvents,forecasts}){
+  if(!priceHistory?.length&&!forecasts?.length) return null;
+  const barData=forecasts?.map(f=>({year:f.year,Revenue:f.revenue,EBITDA:f.ebitda}))||[];
+  // Parse multiples safely
+  const ratioData=forecasts?.map(f=>({
+    year:f.year,
+    "P/E":parseFloat(String(f.pe).replace(",","."))||null,
+    "EV/EBITDA":parseFloat(String(f.evEbitda).replace(",","."))||null,
+  }))||[];
+  const evts=priceEvents||[];
+  return <div>
+    <SecTitle source="Yahoo Finance (real price data, 1-year history)">Price Performance & Key Events</SecTitle>
+    {priceHistory?.length>1&&<LineChartSVG data={priceHistory} events={evts} width={860} height={200} color={P.navy}/>}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,marginTop:20}}>
+      <div>
+        <div style={ff({fontSize:9,fontWeight:700,color:P.gray500,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4})}>Revenue & EBITDA (m)</div>
+        <BarChartSVG data={barData} keys={["Revenue","EBITDA"]} colors={[P.navy,P.accent]} width={400} height={170}/>
+      </div>
+      <div>
+        <div style={ff({fontSize:9,fontWeight:700,color:P.gray500,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4})}>Valuation Multiples (x)</div>
+        <MultiLineSVG data={ratioData} keys={["P/E","EV/EBITDA"]} colors={[P.blue,P.gold]} width={400} height={170}/>
+      </div>
+    </div>
+  </div>;
+}
+
+function Thesis({points}){
+  return <div>
+    <SecTitle source="Eurobroker Research analysis; company guidance, industry reports">Investment Thesis</SecTitle>
+    {points.map((p,i)=>(
+      <div key={i} style={{marginBottom:16,paddingLeft:14,borderLeft:`3px solid ${i===0?P.blue:i===1?P.accent:P.navy}`}}>
+        <div style={ff({fontWeight:800,color:P.navy,fontSize:12,marginBottom:4})}>{i+1}. {p.title}</div>
+        <div style={ff({fontSize:12.5,lineHeight:1.8,color:P.text})}>{p.body}</div>
+      </div>
+    ))}
+  </div>;
+}
+
+function ForecastTable({forecasts}){
+  const est=["FY2025E","FY2026E","FY2027E"];
+  const rows=[
+    {key:"revenue",label:"Revenue (m)",fmt:v=>Number(v)?.toLocaleString()},
+    {key:"revenueGrowth",label:"Revenue Growth (%)"},
+    {key:"ebitda",label:"EBITDA (m)",fmt:v=>Number(v)?.toLocaleString()},
+    {key:"ebitdaMargin",label:"EBITDA Margin (%)"},
+    {key:"netIncome",label:"Net Income (m)",fmt:v=>Number(v)?.toLocaleString()},
+    {key:"eps",label:"EPS"},{key:"dps",label:"DPS"},{key:"pe",label:"P/E (x)"},{key:"evEbitda",label:"EV/EBITDA (x)"},
+  ];
+  return <div>
+    <SecTitle source="Annual reports (A); Eurobroker Research estimates (E)">Financial Forecasts</SecTitle>
+    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+      <thead>
+        <tr style={{background:P.navy}}>
+          <th style={ff({padding:"7px 10px",textAlign:"left",color:P.white,fontSize:10,fontWeight:700})}></th>
+          {forecasts.map(fc=><th key={fc.year} style={ff({padding:"7px 10px",textAlign:"right",color:est.includes(fc.year)?"#93C5FD":P.white,fontSize:10,fontWeight:700})}>{fc.year}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r,ri)=>(
+          <tr key={r.key} style={{background:ri%2===1?P.gray50:P.white}}>
+            <td style={ff({padding:"5px 10px",fontSize:11,color:P.gray700})}>{r.label}</td>
+            {forecasts.map((fc,fi)=>(
+              <td key={fi} style={ff({padding:"5px 10px",textAlign:"right",background:est.includes(fc.year)?(ri%2===1?"#E0ECFF":P.lightBlue):"inherit",fontSize:11,color:P.navy})}>
+                {r.fmt?r.fmt(fc[r.key]):fc[r.key]||"—"}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>;
+}
+
+function Valuation({note,peers,covered}){
+  const cols=["Company","Ticker","Mkt Cap","P/E 2025E","EV/EBITDA 2025E","Rev Growth","EBITDA Margin","Rating"];
+  return <div>
+    <SecTitle source="Bloomberg, FactSet consensus; Eurobroker Research">Valuation</SecTitle>
+    <p style={ff({fontSize:12.5,lineHeight:1.8,color:P.text,marginBottom:14})}>{note}</p>
+    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+      <thead><tr style={{background:P.gray100}}>{cols.map((c,i)=><th key={i} style={ff({padding:"6px 10px",textAlign:i<2?"left":"right",color:P.gray700,fontSize:10,fontWeight:700,borderBottom:`2px solid ${P.navy}`})}>{c}</th>)}</tr></thead>
+      <tbody>{(peers||[]).map((p,i)=>{
+        const isCov=p.name===covered||p.ticker===covered;
+        return <tr key={i} style={{background:isCov?"#DBEAFE":i%2===1?P.gray50:P.white}}>
+          {[p.name,p.ticker,p.mktCap,p.pe,p.evEbitda,p.revenueGrowth,p.ebitdaMargin,p.rating].map((v,j)=>(
+            <td key={j} style={ff({padding:"5px 10px",textAlign:j<2?"left":"right",fontWeight:isCov?800:400,fontSize:11})}>{v||"—"}</td>
+          ))}
+        </tr>;
+      })}</tbody>
+    </table>
+  </div>;
+}
+
+function SWOT({swot}){
+  const q=[
+    {label:"Strengths",items:swot.strengths,bg:"#F0FDF4",border:P.green},
+    {label:"Weaknesses",items:swot.weaknesses,bg:"#FFF7ED",border:P.gold},
+    {label:"Opportunities",items:swot.opportunities,bg:"#EFF6FF",border:P.blue},
+    {label:"Threats",items:swot.threats,bg:"#FEF2F2",border:P.red},
+  ];
+  return <div>
+    <SecTitle source="Eurobroker Research analysis">SWOT Analysis</SecTitle>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:2,background:P.gray300}}>
+      {q.map((qt,i)=>(
+        <div key={i} style={{background:qt.bg,padding:"12px 14px"}}>
+          <div style={ff({fontSize:9,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:qt.border,marginBottom:8})}>{qt.label}</div>
+          {(qt.items||[]).map((it,j)=><div key={j} style={ff({fontSize:11.5,color:P.text,marginBottom:5,paddingLeft:8,borderLeft:`2px solid ${qt.border}`})}>{it}</div>)}
+        </div>
+      ))}
+    </div>
+  </div>;
+}
+
+const RLC={High:P.red,Medium:P.gold,Low:P.green};
+function CatalystsRisks({catalysts,risks}){
+  return <div>
+    <SecTitle source="Company IR calendar, Eurobroker Research">Catalysts & Risks</SecTitle>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:28}}>
+      <div>
+        <div style={ff({fontSize:10,fontWeight:800,color:P.navy,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10,paddingBottom:4,borderBottom:`2px solid ${P.navy}`})}>Near-Term Catalysts</div>
+        {(catalysts||[]).map((c,i)=>(
+          <div key={i} style={{marginBottom:9,paddingBottom:9,borderBottom:`1px solid ${P.gray100}`}}>
+            <div style={ff({fontSize:9,color:P.blue,fontWeight:700,marginBottom:2})}>{c.date}</div>
+            <div style={ff({fontSize:11.5,color:P.text})}>{c.description}</div>
+          </div>
+        ))}
+      </div>
+      <div>
+        <div style={ff({fontSize:10,fontWeight:800,color:P.navy,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10,paddingBottom:4,borderBottom:`2px solid ${P.navy}`})}>Key Risks</div>
+        {(risks||[]).map((r,i)=>(
+          <div key={i} style={{marginBottom:9,paddingBottom:9,borderBottom:`1px solid ${P.gray100}`}}>
+            <span style={ff({fontSize:9,fontWeight:800,color:RLC[r.level]||P.gray500,marginRight:8,textTransform:"uppercase"})}>{r.level}</span>
+            <span style={ff({fontSize:11.5,color:P.text})}>{r.description}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>;
+}
+
+function ESG({esg}){
+  const rows=[
+    {label:"Environmental",score:parseESG(esg.environmental?.score),comment:esg.environmental?.comment},
+    {label:"Social",score:parseESG(esg.social?.score),comment:esg.social?.comment},
+    {label:"Governance",score:parseESG(esg.governance?.score),comment:esg.governance?.comment},
+  ];
+  return <div>
+    <SecTitle source="MSCI ESG Ratings, Sustainalytics (illustrative)">ESG Scorecard</SecTitle>
+    <div style={{display:"flex",gap:12}}>
+      {rows.map((r,i)=>(
+        <div key={i} style={{flex:1,background:P.gray50,border:`1px solid ${P.gray300}`,padding:"8px 10px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+            <span style={ff({fontSize:9,fontWeight:800,color:P.gray700,textTransform:"uppercase"})}>{r.label}</span>
+            <span style={ff({fontSize:13,fontWeight:800,color:P.navy})}>{r.score}<span style={{fontSize:9,color:P.gray500}}>/100</span></span>
+          </div>
+          <div style={{background:P.gray300,height:5,marginBottom:5,position:"relative",overflow:"hidden",borderRadius:2}}>
+            <div style={{position:"absolute",top:0,left:0,height:"100%",width:`${r.score}%`,background:r.score>70?P.green:r.score>45?P.gold:P.red,borderRadius:2}}/>
+          </div>
+          <div style={ff({fontSize:9,color:P.gray500,lineHeight:1.4})}>{r.comment}</div>
+        </div>
+      ))}
+    </div>
+  </div>;
+}
+
+function News({news}){
+  return <div>
+    <SecTitle source="Company press releases, Reuters, Bloomberg">Recent Developments</SecTitle>
+    {(news||[]).map((n,i)=>(
+      <div key={i} style={{display:"grid",gridTemplateColumns:"80px 1fr",gap:14,marginBottom:10,paddingBottom:10,borderBottom:i<news.length-1?`1px solid ${P.gray100}`:"none"}}>
+        <div style={ff({fontSize:10,color:P.blue,fontWeight:700})}>{n.date}</div>
+        <div>
+          <div style={ff({fontWeight:700,fontSize:12,color:P.navy,marginBottom:2})}>{n.headline}</div>
+          <div style={ff({fontSize:11.5,color:P.gray700})}>{n.context}</div>
+        </div>
+      </div>
+    ))}
+  </div>;
+}
+
+function Disclosures({data}){
+  return <div style={{marginTop:28,borderTop:`3px solid ${P.navy}`,background:P.gray50,padding:"14px 16px"}}>
+    <div style={ff({fontSize:9,color:P.gray500,lineHeight:1.9,marginBottom:14})}>
+      <strong>Analyst Certification:</strong> Armand de Valroger certifies that the views expressed herein accurately reflect personal views about the subject securities.
+      {" "}<strong>Important Disclosures:</strong> Market data sourced from Yahoo Finance. Forecasts and analysis are Eurobroker Research estimates. This material is for informational purposes only and does not constitute investment advice. Generated using Claude AI (Anthropic). All forecasts are illustrative.
+    </div>
+    <div style={ff({fontSize:9,fontWeight:800,color:P.navy,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:6})}>Rating History</div>
+    <table style={{borderCollapse:"collapse",fontSize:10}}>
+      <thead><tr>{["Date","Rating","Price Target","Share Price"].map(h=><th key={h} style={ff({padding:"3px 14px 3px 0",borderBottom:`1px solid ${P.gray700}`,textAlign:"left",color:P.gray700,fontWeight:700})}>{h}</th>)}</tr></thead>
+      <tbody>{(data.ratingHistory||[]).map((r,i)=>(
+        <tr key={i}>
+          <td style={ff({padding:"3px 14px 3px 0",color:P.gray500})}>{r.date}</td>
+          <td style={ff({padding:"3px 14px 3px 0",fontWeight:800,color:RC[r.rating]||P.gray500})}>{r.rating}</td>
+          <td style={ff({padding:"3px 14px 3px 0"})}>{data.currency} {r.priceTarget}</td>
+          <td style={ff({padding:"3px 14px 3px 0"})}>{data.currency} {r.sharePrice}</td>
+        </tr>
+      ))}</tbody>
+    </table>
+  </div>;
+}
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+function App(){
+  const [ticker,setTicker]=useState("");
+  const [data,setData]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState(null);
+  const [loadingMsg,setLoadingMsg]=useState("Fetching market data...");
+  const noteRef=useRef(null);
+
+  const generate=async(t)=>{
+    const q=(t||ticker).trim();
+    if(!q) return;
+    setLoading(true);setError(null);setData(null);
+    try{
+      // Step 1 — fetch Yahoo Finance data
+      setLoadingMsg("Fetching real market data from Yahoo Finance...");
+      let yahooData=null;
+      try{
+        const yhRes=await fetch("/api/yahoo",{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({query:q}),
+        });
+        if(yhRes.ok) yahooData=await yhRes.json();
+      }catch(e){console.log("Yahoo fetch failed:",e.message);}
+
+      // Step 2 — generate research note with Claude
+      setLoadingMsg("Generating research note with Claude AI...");
+      const res=await fetch("/api/research",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({query:q,yahooData}),
+      });
+      if(!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+      const json=await res.json();
+      let raw=json.text.trim().replace(/^```(?:json)?\s*/i,"").replace(/```\s*$/i,"").trim();
+      const parsed=JSON.parse(raw);
+      // Override with real price history from backend
+      if(json.priceHistory&&json.priceHistory.length>0){
+        parsed.priceHistory=json.priceHistory;
+      }
+      if(json.priceEvents) parsed.priceEvents=json.priceEvents;
+      if(parsed.priceEvents&&parsed.priceHistory){
+        parsed.priceHistory=parsed.priceHistory.map(pt=>{
+          const ev=parsed.priceEvents.find(e=>e.date===pt.date);
+          return ev?{...pt,event:ev.event}:pt;
+        });
+      }
+      setData(parsed);
+    }catch(e){setError(e.message);}
+    finally{setLoading(false);}
+  };
+
+  const exportPDF=()=>{
+    if(!noteRef.current) return;
+    const styleId="print-eb";
+    let el=document.getElementById(styleId);
+    if(!el){el=document.createElement("style");el.id=styleId;document.head.appendChild(el);}
+    el.textContent=`@media print{body>*:not(#eb-print-root){display:none!important}#eb-print-root{display:block!important;position:static!important}@page{margin:10mm 12mm;size:A4}*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}`;
+    const wrap=document.createElement("div");wrap.id="eb-print-root";
+    wrap.style.cssText="display:none;position:fixed;top:0;left:0;width:100%;z-index:99999;background:#fff;";
+    wrap.innerHTML=noteRef.current.outerHTML;
+    document.body.appendChild(wrap);window.print();
+    setTimeout(()=>{document.body.removeChild(wrap);el.textContent="";},2000);
+  };
+
+  return <div style={ff({background:"#F3F4F6",minHeight:"100vh",padding:"24px 16px"})}>
+    {/* Hero */}
+    <div style={{maxWidth:900,margin:"0 auto 20px"}}>
+      <div style={{background:P.navy,padding:"40px 40px 36px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",top:-40,right:-40,width:220,height:220,borderRadius:"50%",background:"rgba(59,130,246,0.08)"}}/>
+        <div style={{position:"absolute",bottom:-60,right:80,width:160,height:160,borderRadius:"50%",background:"rgba(29,78,216,0.12)"}}/>
+        <div style={{position:"relative",zIndex:1}}>
+          <div style={ff({fontSize:10,fontWeight:800,letterSpacing:"0.2em",textTransform:"uppercase",color:"#3B82F6",marginBottom:10})}>EUROBROKER RESEARCH</div>
+          <div style={ff({fontSize:28,fontWeight:900,color:P.white,lineHeight:1.2,marginBottom:8,letterSpacing:"-0.02em"})}>Equity Research<br/>Note Generator</div>
+          <div style={ff({fontSize:13,color:"#93C5FD",marginBottom:28,lineHeight:1.6})}>Institutional-grade research notes powered by AI.<br/>Real market data from Yahoo Finance · Analysis by Claude Sonnet</div>
+          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+            <input style={ff({flex:1,maxWidth:340,border:"2px solid rgba(255,255,255,0.15)",background:"rgba(255,255,255,0.08)",color:P.white,padding:"12px 16px",fontSize:14})}
+              placeholder="e.g. SAF.PA, AAPL, MC.PA, ASML..."
+              value={ticker} onChange={e=>setTicker(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&generate()}/>
+            <button onClick={()=>generate()} style={ff({background:"#1D4ED8",color:P.white,border:"none",padding:"12px 24px",fontSize:13,cursor:"pointer",fontWeight:800,whiteSpace:"nowrap"})}>
+              Generate Note →
+            </button>
+            {data&&<button onClick={exportPDF} style={ff({background:"rgba(255,255,255,0.1)",color:P.white,border:"1px solid rgba(255,255,255,0.2)",padding:"12px 16px",fontSize:12,cursor:"pointer",fontWeight:700})}>Export PDF</button>}
+          </div>
+          <div style={{marginTop:16,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={ff({fontSize:10,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.08em"})}>Try:</span>
+            {["SAF.PA","MC.PA","AAPL","ASML","TTE.PA","AIR.PA"].map(t=>(
+              <span key={t} onClick={()=>{setTicker(t);generate(t);}} style={ff({fontSize:11,color:"#93C5FD",cursor:"pointer",padding:"3px 10px",border:"1px solid rgba(147,197,253,0.25)",background:"rgba(147,197,253,0.06)",letterSpacing:"0.04em",fontWeight:600})}>{t}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{background:"#0A1628",padding:"14px 40px",display:"flex",gap:32,borderTop:"1px solid rgba(255,255,255,0.06)",flexWrap:"wrap"}}>
+        {[["Real Market Data","Yahoo Finance API"],["AI Analysis","Claude Sonnet 4"],["Coverage","Global Equities"],["Format","Sell-Side Standard"]].map(([title,sub])=>(
+          <div key={title}>
+            <div style={ff({fontSize:11,fontWeight:700,color:P.white})}>{title}</div>
+            <div style={ff({fontSize:10,color:"#475569"})}>{sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {error&&<div style={ff({maxWidth:900,margin:"0 auto 16px",border:`1px solid ${P.red}`,padding:"10px 14px",color:P.red,fontSize:12})}>{error}</div>}
+    {loading&&<div style={{animation:"pulse 1.8s ease-in-out infinite",textAlign:"center",padding:"80px 0"}}>
+      <div style={ff({fontSize:14,color:P.gray500,marginBottom:8})}>{loadingMsg}</div>
+      <div style={ff({fontSize:11,color:P.gray300})}>This may take 20–30 seconds</div>
+    </div>}
+
+    {data&&(
+      <div ref={noteRef} style={{maxWidth:900,margin:"0 auto",background:P.white,boxShadow:"0 1px 4px rgba(0,0,0,0.08)"}}>
+        <Header data={data}/>
+        <TitleBlock data={data} onRegen={()=>generate(data.ticker)}/>
+        <div style={{padding:"4px 28px 24px"}}>
+          <ExecSummary text={data.executiveSummary}/>
+          <HR/><Metrics m={data.metrics}/>
+          <HR/><Charts priceHistory={data.priceHistory} priceEvents={data.priceEvents} forecasts={data.forecasts}/>
+          <HR/><Thesis points={data.thesisPoints}/>
+          <HR/><ForecastTable forecasts={data.forecasts}/>
+          <HR/><Valuation note={data.valuationNote} peers={data.peers} covered={data.ticker}/>
+          <HR/><SWOT swot={data.swot}/>
+          <HR/><CatalystsRisks catalysts={data.catalysts} risks={data.risks}/>
+          <HR/><ESG esg={data.esg}/>
+          <HR/><News news={data.news}/>
+          <Disclosures data={data}/>
+        </div>
+      </div>
+    )}
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
